@@ -42,8 +42,7 @@ int sys_open(const char* path, int flags, mode_t mode)
 	int file = (mode < 0) ? open(path, flags) : open(path, flags, mode);
 
 	if (file < 0) {
-		log_err("error while opening file: %s -- bailing out!\n", path);
-		sys_exit();
+		fatal("open(%s) failed", path);
 	}
 
 	return file;
@@ -52,32 +51,28 @@ int sys_open(const char* path, int flags, mode_t mode)
 void sys_fclose(FILE* file)
 {
 	if (fclose(file) < 0) {
-		log_err("error while closing file -- bailing out\n");
-		sys_exit();
+		fatal("fclose() failed");
 	}
 }
 
-void sys_fstat(int filedes, struct stat * stat_buf)
+void sys_fstat(int filedes, struct stat* stat_buf)
 {
 	if (fstat(filedes,stat_buf) < 0) {
-		log_err("error while fstating file (fd = %d) -- bailing out\n",filedes);
-		sys_exit();
+		fatal("fstat(%d) failed", filedes);
 	}
 }
 
-void sys_stat(char * pathname, struct stat * stat_buf)
+void sys_stat(char* pathname, struct stat* stat_buf)
 {
 	if (stat(pathname,stat_buf) < 0) {
-		log_err("error while stating file -- bailing out\n");
-		sys_exit();
+		fatal("stat(%s) failed", pathname);
 	}
 }
 
 void sys_close(int filedes)
 {
 	if (close(filedes) < 0) {
-		log_err("error while closing file -- bailing out\n");
-		sys_exit();
+		fatal("close(%d) failed", filedes);
 	}
 }
 

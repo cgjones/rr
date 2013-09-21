@@ -2515,6 +2515,7 @@ void rec_process_syscall(struct task *t)
 		int prot = regs.edx, flags = regs.esi;
 		struct mmapped_file file;
 		char* filename;
+		int file_exists;
 
 		if (SYSCALL_FAILED(regs.eax)) {
 			/* We purely emulate failed mmaps. */
@@ -2538,7 +2539,18 @@ void rec_process_syscall(struct task *t)
 		strcpy(file.filename, filename);
 		sys_free((void**)&filename);
 
-		sys_stat(file.filename, &file.stat);
+		if (0 == stat(file.filename, &file.stat)) {
+			file_exists = 1;
+		} else {
+			int err = errno;
+			assert_exec(t, ENOENT == err,
+				    "errno is %d but mmap succeeded?", err);
+			file_exists = 0;
+			/* Clear the filename, because a new,
+			 * different file with the same name may
+			 * reappear before replay. */
+			strcpy(file.filename, "");
+		}
 
 		file.start = addr;
 		file.end = get_mmaped_region_end(t, addr);
@@ -2549,9 +2561,10 @@ void rec_process_syscall(struct task *t)
 			t->syscallbuf_lib_end = file.end;
 		}
 
-		file.copied = should_copy_mmap_region(file.filename,
-						      &file.stat,
-						      prot, flags);
+		file.copied = (!file_exists
+			       || should_copy_mmap_region(file.filename,
+							  &file.stat,
+							  prot, flags));
 		if (file.copied) {
 			record_child_data(t, size, addr);
 		}
