@@ -1,6 +1,6 @@
 /* -*- Mode: C; tab-width: 8; c-basic-offset: 8; indent-tabs-mode: t; -*- */
 
-//#define DEBUGTAG "gdb"
+#define DEBUGTAG "gdb"
 
 /**
  * Much of this implementation is based on the documentation at
@@ -53,6 +53,8 @@ struct dbg_context {
 					     * request lookups */
 	int no_ack;		/* nonzero when "no-ack mode" is
 				 * enabled */
+	int non_stop;		 /* nonzero when "non-stop mode" is
+				  * enabled" */
 	struct sockaddr_in addr;	    /* server address */
 	int fd;				    /* client socket fd */
 	/* XXX probably need to dynamically size these */
@@ -249,12 +251,11 @@ static void write_hex(struct dbg_context* dbg, unsigned long hex)
 	write_data_raw(dbg, (byte*)buf, len);
 }
 
-static void write_packet(struct dbg_context* dbg, const char* data)
+static void write_packet_payload(struct dbg_context* dbg, const char* data)
 {
 	byte checksum;
 	size_t len, i;
 
-	write_data_raw(dbg, (byte*)"$", 1);
 	len = strlen(data);
 	for (i = 0, checksum = 0; i < len; ++i) {
 		checksum += data[i];
@@ -264,12 +265,37 @@ static void write_packet(struct dbg_context* dbg, const char* data)
 	write_hex(dbg, checksum);
 }
 
-static void write_hex_packet(struct dbg_context* dbg, unsigned long hex)
+static void write_packet(struct dbg_context* dbg, const char* data)
 {
-	char buf[32];
+	write_data_raw(dbg, (byte*)"$", 1);
+	write_packet_payload(dbg, data);
+}
 
-	snprintf(buf, sizeof(buf) - 1, "%02lx", hex);
-	write_packet(dbg, buf);	
+static void write_async_packet(struct dbg_context* dbg, const char* data)
+{
+	/** */
+	write_data_raw(dbg, (byte*)"%", 1);
+	write_packet_payload(dbg, data);
+}
+
+static void write_hex_encoded_bytes(struct dbg_context* dbg, const byte* data,
+				    size_t len)
+{
+	char* buf = sys_malloc(2 * len + 1);
+	size_t i;
+
+	for (i = 0; i < len; ++i) {
+		unsigned long b = data[i];
+		snprintf(&buf[2 * i], 3, "%02lx", b);
+	}
+	write_packet(dbg, buf);
+	sys_free((void**)&buf);
+}
+
+static void write_hex_encoded_ascii_string(struct dbg_context* dbg,
+					   const char* str)
+{
+	write_hex_encoded_bytes(dbg, (const byte*)str, strlen(str));	
 }
 
 /**
@@ -424,7 +450,7 @@ static int query(struct dbg_context* dbg, char* payload)
 	if (!strcmp(name, "Supported")) {
 		/* TODO process these */
 		debug("gdb supports %s", args);
-		write_packet(dbg, "QStartNoAckMode+");
+		write_packet(dbg, "QStartNoAckMode+;QNonStop+");
 		return 0;
 	}
 	if (!strcmp(name, "Symbol")) {
@@ -434,8 +460,7 @@ static int query(struct dbg_context* dbg, char* payload)
 		return 0;
 	}
 	if (strstr(name, "ThreadExtraInfo") == name) {
-		/* TODO */
-		write_packet(dbg, "");
+		write_hex_encoded_ascii_string(dbg, "rr tracee");
 		return 0;
 	}
 	if (!strcmp(name, "TStatus")) {
@@ -469,8 +494,18 @@ static int set(struct dbg_context* dbg, char* payload)
 		dbg->no_ack = 1;
 		return 0;
 	}
+	if (!strcmp(name, "NonStop")) {
+		if (strcmp("1", args)) {
+			fatal("gdb requests %s(%s), but rr stub only supports enabling non-stop",
+			      name, args);
+		}
 
-	log_warn("Unhandled gdb set: Q%s", name);
+		write_packet(dbg, "OK");
+		dbg->non_stop = 1;
+		return 0;
+	}
+
+	log_warn("Unhandled gdb set: Q%s(%s)", name, args);
 	write_packet(dbg, "");
 	return 0;
 }
@@ -489,6 +524,76 @@ static void consume_request(struct dbg_context* dbg)
 {
 	memset(&dbg->req, 0, sizeof(dbg->req));
 	write_flush(dbg);
+}
+
+/**
+ * Translate linux-x86 |sig| to gdb's internal numbering.  Translation
+ * made according to gdb/include/gdb/signals.def.
+ */
+static int to_gdb_signum(int sig)
+{
+	if (SIGRTMIN <= sig && sig <= SIGRTMAX) {
+		/* GDB_SIGNAL_REALTIME_34 is numbered 46, hence this
+		 * offset. */
+		return sig + 12;
+	}
+	switch (sig) {
+	case 0: return 0;
+	case SIGHUP: return 1;
+	case SIGINT: return 2;
+	case SIGQUIT: return 3;
+	case SIGILL: return 4;
+	case SIGTRAP: return 5;
+	case SIGABRT/*case SIGIOT*/: return 6;
+	case SIGBUS: return 10;
+	case SIGFPE: return 8;
+	case SIGKILL: return 9;
+	case SIGUSR1: return 30;
+	case SIGSEGV: return 11;
+	case SIGUSR2: return 31;
+	case SIGPIPE: return 13;
+	case SIGALRM: return 14;
+	case SIGTERM: return 15;
+		/* gdb hasn't heard of SIGSTKFLT, so this is
+		 * arbitrarily made up.  SIGDANGER just sounds cool.*/
+	case SIGSTKFLT: return 38/*GDB_SIGNAL_DANGER*/;
+	/*case SIGCLD*/case SIGCHLD: return 20;
+	case SIGCONT: return 19;
+	case SIGSTOP: return 17;
+	case SIGTSTP: return 18;
+	case SIGTTIN: return 21;
+	case SIGTTOU: return 22;
+	case SIGURG: return 16;
+	case SIGXCPU: return 24;
+	case SIGXFSZ: return 25;
+	case SIGVTALRM: return 26;
+	case SIGPROF: return 27;
+	case SIGWINCH: return 28;
+	/*case SIGPOLL*/case SIGIO: return 23;
+	case SIGPWR: return 32;
+	case SIGSYS: return 12;
+	default:
+		fatal("Unknown signal %d", sig);
+	}
+}
+
+enum { DEFAULT_PACKET = 0, ASYNC_PACKET };
+static void send_stop_reply_packet(struct dbg_context* dbg,
+				   int async, const char* pfx,
+				   dbg_threadid_t thread, int sig)
+{
+	if (sig >= 0) {
+		char buf[128];
+		snprintf(buf, sizeof(buf) - 1, "%sT%02xthread:%02x;",
+			 pfx, to_gdb_signum(sig), thread);
+		if (async) {
+			write_async_packet(dbg, buf);
+		} else {
+			write_packet(dbg, buf);
+		}
+	} else {
+		write_packet(dbg, "E01");
+	}
 }
 
 static int process_vpacket(struct dbg_context* dbg, char* payload)
@@ -526,6 +631,20 @@ static int process_vpacket(struct dbg_context* dbg, char* payload)
 				dbg->req.target = dbg->resume_thread;
 			}
 			return 1;
+		case 't': {
+			dbg_threadid_t thread = parse_threadid(args, &args);
+			/* The thread is already stopped, or else we
+			 * wouldn't have been able to process this
+			 * request. */
+			write_packet(dbg, "OK");
+
+
+			send_stop_reply_packet(dbg, ASYNC_PACKET,
+					       "Stop:", thread, 0);
+
+
+			return 0;
+		}
 		default:
 			log_warn("Unhandled vCont command %c(%s)", cmd, args);
 			write_packet(dbg, "");
@@ -536,6 +655,25 @@ static int process_vpacket(struct dbg_context* dbg, char* payload)
 	if (!strcmp("Cont?", name)) {
 		debug("gdb queries which continue commands we support");
 		write_packet(dbg, "vCont;c;C;s;S;t;");
+		return 0;
+	}
+
+	if (!strcmp("Stopped", name)) {
+		debug("gdb ack'ing stopped notification");
+		//write_packet(dbg, "OK");
+
+
+		static int replying = 1;
+		if (!replying) {
+			send_stop_reply_packet(dbg, DEFAULT_PACKET, "",
+					       0x69e8, 0);
+			replying = 1;
+		} else {
+			write_packet(dbg, "OK");
+//			replying = 0;
+		}
+
+
 		return 0;
 	}
 
@@ -565,16 +703,48 @@ static int process_packet(struct dbg_context* dbg)
 
 	debug("raw request %c(%s)", request, payload);
 
+	/* These requests can be satisfied without knowing whether gdb
+	 * has requested non-stop mode or not. */
+	switch (request) {
+	case 'D':
+		log_info("gdb is detaching from us, exiting");
+		write_packet(dbg, "OK");
+		exit(0);
+	case 'H':
+		if ('c' == *payload++) {
+			dbg->req.type = DREQ_SET_CONTINUE_THREAD;
+		} else {
+			dbg->req.type = DREQ_SET_QUERY_THREAD;
+		}
+		dbg->req.target = parse_threadid(payload, &payload);
+		assert('\0' == *payload);
+
+		debug("gdb selecting %d", dbg->req.target);
+
+		ret = 1;
+		goto processed_request;
+	case 'q':
+		ret = query(dbg, payload);
+		goto processed_request;
+	case 'Q':
+		ret = set(dbg, payload);
+		goto processed_request;
+	default:
+		/* fall through to next switch statement */
+		break;
+	}
+
+	if (!dbg->non_stop) {
+		fatal("Request for %c(%s) when in unsupported all-stop mode",
+		      request, payload);
+	}
+
 	switch(request) {
 	case INTERRUPT_CHAR:
 		debug("gdb requests interrupt");
 		dbg->req.type = DREQ_INTERRUPT;
 		ret = 1;
 		break;
-	case 'D':
-		log_info("gdb is detaching from us, exiting");
-		write_packet(dbg, "OK");
-		exit(0);
 	case 'g':
 		dbg->req.type = DREQ_GET_REGS;
 		dbg->req.target = dbg->query_thread;
@@ -588,19 +758,6 @@ static int process_packet(struct dbg_context* dbg)
 		 * with ignoring these requests. */
 		write_packet(dbg, "");
 		ret = 0;
-		break;
-	case 'H':
-		if ('c' == *payload++) {
-			dbg->req.type = DREQ_SET_CONTINUE_THREAD;
-		} else {
-			dbg->req.type = DREQ_SET_QUERY_THREAD;
-		}
-		dbg->req.target = parse_threadid(payload, &payload);
-		assert('\0' == *payload);
-
-		debug("gdb selecting %d", dbg->req.target);
-
-		ret = 1;
 		break;
 	case 'k':
 		log_info("gdb requests kill, exiting");
@@ -640,12 +797,6 @@ static int process_packet(struct dbg_context* dbg)
 		 * with ignoring these requests. */
 		write_packet(dbg, "");
 		ret = 0;
-		break;
-	case 'q':
-		ret = query(dbg, payload);
-		break;
-	case 'Q':
-		ret = set(dbg, payload);
 		break;
 	case 'T':
 		dbg->req.type = DREQ_GET_IS_THREAD_ALIVE;
@@ -701,6 +852,8 @@ static int process_packet(struct dbg_context* dbg)
 		write_packet(dbg, "");
 		ret = 0;
 	}
+
+processed_request:
 	/* Erase the newly processed packet from the input buffer. */
 	memmove(dbg->inbuf, dbg->inbuf + dbg->packetend,
 		dbg->inlen - dbg->packetend);
@@ -769,76 +922,23 @@ void dbg_notify_exit_signal(struct dbg_context* dbg, int sig)
 	consume_request(dbg);
 }
 
-/**
- * Translate linux-x86 |sig| to gdb's internal numbering.  Translation
- * made according to gdb/include/gdb/signals.def.
- */
-static int to_gdb_signum(int sig)
-{
-	if (SIGRTMIN <= sig && sig <= SIGRTMAX) {
-		/* GDB_SIGNAL_REALTIME_34 is numbered 46, hence this
-		 * offset. */
-		return sig + 12;
-	}
-	switch (sig) {
-	case 0: return 0;
-	case SIGHUP: return 1;
-	case SIGINT: return 2;
-	case SIGQUIT: return 3;
-	case SIGILL: return 4;
-	case SIGTRAP: return 5;
-	case SIGABRT/*case SIGIOT*/: return 6;
-	case SIGBUS: return 10;
-	case SIGFPE: return 8;
-	case SIGKILL: return 9;
-	case SIGUSR1: return 30;
-	case SIGSEGV: return 11;
-	case SIGUSR2: return 31;
-	case SIGPIPE: return 13;
-	case SIGALRM: return 14;
-	case SIGTERM: return 15;
-		/* gdb hasn't heard of SIGSTKFLT, so this is
-		 * arbitrarily made up.  SIGDANGER just sounds cool.*/
-	case SIGSTKFLT: return 38/*GDB_SIGNAL_DANGER*/;
-	/*case SIGCLD*/case SIGCHLD: return 20;
-	case SIGCONT: return 19;
-	case SIGSTOP: return 17;
-	case SIGTSTP: return 18;
-	case SIGTTIN: return 21;
-	case SIGTTOU: return 22;
-	case SIGURG: return 16;
-	case SIGXCPU: return 24;
-	case SIGXFSZ: return 25;
-	case SIGVTALRM: return 26;
-	case SIGPROF: return 27;
-	case SIGWINCH: return 28;
-	/*case SIGPOLL*/case SIGIO: return 23;
-	case SIGPWR: return 32;
-	case SIGSYS: return 12;
-	default:
-		fatal("Unknown signal %d", sig);
-	}
-}
-
-static void send_stop_reply_packet(struct dbg_context* dbg,
-				   dbg_threadid_t thread, int sig)
-{
-	if (sig >= 0) {
-		char buf[64];
-		snprintf(buf, sizeof(buf) - 1, "T%02xthread:%02x;",
-			 to_gdb_signum(sig), thread);
-		write_packet(dbg, buf);
-	} else {
-		write_packet(dbg, "E01");
-	}
-}
-
 void dbg_notify_stop(struct dbg_context* dbg, dbg_threadid_t thread, int sig)
 {
+	assert(dbg->non_stop);
 	assert(dbg_is_resume_request(&dbg->req)
 	       || dbg->req.type == DREQ_INTERRUPT);
 
-	send_stop_reply_packet(dbg, thread, sig);
+	send_stop_reply_packet(dbg, ASYNC_PACKET, "Stop:", thread, sig);
+
+	consume_request(dbg);
+}
+
+void dbg_reply_invalid_target(struct dbg_context* dbg,
+			      const struct dbg_request* req)
+{
+	assert(!memcmp(req, &dbg->req, sizeof(*req)));
+
+	write_packet(dbg, "E00");
 
 	consume_request(dbg);
 }
@@ -846,10 +946,13 @@ void dbg_notify_stop(struct dbg_context* dbg, dbg_threadid_t thread, int sig)
 void dbg_reply_get_current_thread(struct dbg_context* dbg,
 				  dbg_threadid_t thread)
 {
+	char buf[32];
+
 	assert(DREQ_GET_CURRENT_THREAD == dbg->req.type);
 
 	/* TODO multiprocess */
-	write_hex_packet(dbg, thread);
+	snprintf(buf, sizeof(buf) - 1, "QC%02x", thread);
+	write_packet(dbg, buf);
 
 	consume_request(dbg);
 }
@@ -880,21 +983,11 @@ void dbg_reply_select_thread(struct dbg_context* dbg, int ok)
 
 void dbg_reply_get_mem(struct dbg_context* dbg, const byte* mem, size_t len)
 {
-	char* buf;
-
 	assert(DREQ_GET_MEM == dbg->req.type);
 	assert(len <= dbg->req.mem.len);
 
 	if (len > 0) {
-		size_t i;
-
-		buf = sys_malloc(2 * len + 1);
-		for (i = 0; i < len; ++i) {
-			unsigned long b = mem[i];
-			snprintf(&buf[2 * i], 3, "%02lx", b);
-		}
-		write_packet(dbg, buf);
-		sys_free((void**)&buf);
+		write_hex_encoded_bytes(dbg, mem, len);
 	} else {
 		write_packet(dbg, "");
 	}
@@ -964,7 +1057,7 @@ void dbg_reply_get_stop_reason(struct dbg_context* dbg,
 {
 	assert(DREQ_GET_STOP_REASON == dbg->req.type);
 
-	send_stop_reply_packet(dbg, which, sig);
+	send_stop_reply_packet(dbg, DEFAULT_PACKET, "", which, sig);
 
 	consume_request(dbg);
 }

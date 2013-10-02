@@ -162,6 +162,13 @@ void dbg_notify_exit_signal(struct dbg_context* dbg, int sig);
 void dbg_notify_stop(struct dbg_context* dbg, dbg_threadid_t which, int sig);
 
 /**
+ * |req| required a thread target, but the targeted thread either
+ * doesn't exist or couldn't fulfill the request.
+ */
+void dbg_reply_invalid_target(struct dbg_context* dbg,
+			      const struct dbg_request* req);
+
+/**
  * Tell the host that |thread| is the current thread.
  */
 void dbg_reply_get_current_thread(struct dbg_context* dbg,

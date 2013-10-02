@@ -345,9 +345,18 @@ static struct dbg_request process_debugger_requests(struct dbg_context* dbg,
 			break;
 		}
 
-		/* These requests require a valid target task.  We
-		 * trust gdb to use the information provided above to
-		 * only query valid tasks. */
+		/* These requests require a valid target task.
+		 * Debuggers have been observed to send requests for
+		 * tasks that they could have detected were dead by
+		 * using the API above.  So we don't trust that the
+		 * targets of these requests actually exist. */
+		if (!target) {
+			log_warn("Debugger made a request for invalid target %d",
+				 req.target);
+			dbg_reply_invalid_target(dbg, &req);
+			continue;
+		}
+
 		switch (req.type) {
 		case DREQ_GET_MEM: {
 			size_t len;
@@ -1392,7 +1401,7 @@ static void replay_one_trace_frame(struct dbg_context* dbg,
 	case USR_UNSTABLE_EXIT:
 		t->unstable = 1;
 		/* fall through */
-	case USR_EXIT:
+	case USR_EXIT: {
 		/* If the task was killed by a terminating signal,
 		 * then it may have ended abruptly in a syscall or at
 		 * some other random execution point.  That's bad for
@@ -1408,10 +1417,21 @@ static void replay_one_trace_frame(struct dbg_context* dbg,
 		 * shutdown hangs when joining the exited tracee.
 		 * Other terminating signals have not been observed to
 		 * hang, so that's what's used here.. */
+		dbg_threadid_t id = get_threadid(t);
+
 		syscall(SYS_tkill, t->tid, SIGABRT);
 		rep_sched_deregister_thread(&t);
+
+
+
+		if (0 && dbg) {
+			dbg_notify_stop(dbg, id, 0);
+		}
+
+
 		/* Early-return because |t| is gone now. */
 		return;
+	}
 	case USR_ARM_DESCHED:
 	case USR_DISARM_DESCHED:
 		step.action = TSTEP_DESCHED;
