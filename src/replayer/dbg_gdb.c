@@ -201,6 +201,14 @@ static void read_data_once(struct dbg_context* dbg)
 	if (nread <= 0) {
 		fatal("Error reading from gdb");
 	}
+
+#if 0
+	char chunk[1024];
+	memcpy(chunk, dbg->inbuf + dbg->inlen, nread);
+	chunk[nread] = '\0';
+	printf("chunk: %s\n", chunk);
+#endif
+
 	dbg->inlen += nread;
 	assert("Impl dynamic alloc if this fails (or double inbuf size)"
 	       && dbg->inlen < dbg->insize);
@@ -451,6 +459,7 @@ static int query(struct dbg_context* dbg, char* payload)
 		/* TODO process these */
 		debug("gdb supports %s", args);
 		write_packet(dbg, "QStartNoAckMode+;QNonStop+");
+		write_packet(dbg, "QNonStop+");
 		return 0;
 	}
 	if (!strcmp(name, "Symbol")) {
@@ -621,6 +630,7 @@ static int process_vpacket(struct dbg_context* dbg, char* payload)
 		case 'c':
 			dbg->req.type = DREQ_CONTINUE;
 			dbg->req.target = dbg->resume_thread;
+			write_packet(dbg, "OK");
 			return 1;
 		case 's':
 			dbg->req.type = DREQ_STEP;
@@ -630,19 +640,17 @@ static int process_vpacket(struct dbg_context* dbg, char* payload)
 			} else {
 				dbg->req.target = dbg->resume_thread;
 			}
+			write_packet(dbg, "OK");
 			return 1;
 		case 't': {
 			dbg_threadid_t thread = parse_threadid(args, &args);
+
+			write_packet(dbg, "OK");
 			/* The thread is already stopped, or else we
 			 * wouldn't have been able to process this
 			 * request. */
-			write_packet(dbg, "OK");
-
-
 			send_stop_reply_packet(dbg, ASYNC_PACKET,
 					       "Stop:", thread, 0);
-
-
 			return 0;
 		}
 		default:
@@ -660,20 +668,21 @@ static int process_vpacket(struct dbg_context* dbg, char* payload)
 
 	if (!strcmp("Stopped", name)) {
 		debug("gdb ack'ing stopped notification");
-		//write_packet(dbg, "OK");
-
-
-		static int replying = 1;
-		if (!replying) {
-			send_stop_reply_packet(dbg, DEFAULT_PACKET, "",
-					       0x69e8, 0);
-			replying = 1;
-		} else {
-			write_packet(dbg, "OK");
-//			replying = 0;
-		}
-
-
+		/* rr tracee threads can only stop after gdb resume
+		 * requests, so there can only be one un-ack'd stop
+		 * notification (the one we sent in the async-stop
+		 * packet).  This confirms with gdb that that's all
+		 * the stopped threads.
+		 *
+		 * XXX call the stopped thread A.  If the user
+		 * switches to a different thread B after this stop
+		 * notification and resumes B, then gdb will think A
+		 * remains stopped.  But it's impossible for rr to do
+		 * that, so A can execute "behind gdb's back".  For
+		 * now we hope gdb can deal, if it can't, we'll need
+		 * to block resume requests like the one in the above
+		 * example. */
+		write_packet(dbg, "OK");
 		return 0;
 	}
 

@@ -1529,7 +1529,7 @@ static void replay_one_trace_frame(struct dbg_context* dbg,
 
 		/* Notify the debugger and process any new requests
 		 * that might have triggered before resuming. */
-		dbg_notify_stop(dbg, get_threadid(t),	0x05/*gdb mandate*/);
+		dbg_notify_stop(dbg, get_threadid(t), 0x05/*gdb mandate*/);
 		req = process_debugger_requests(dbg, t);
 		assert(dbg_is_resume_request(&req));
 	}
