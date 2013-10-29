@@ -2680,7 +2680,19 @@ void rec_process_syscall(struct task *t)
 						      prot, flags,
 						      WARN_DEFAULT);
 		if (file.copied) {
-			record_child_data(t, size, addr);
+			/* We'll be restoring this segment with an
+			 * anonymous mmap during replay.  The replayed
+			 * segment is guaranteed to be initially
+			 * zeroed.  So if the contents recorded here
+			 * are also zero, then don't need to save the
+			 * data for replay; a no-op save/restore will
+			 * give us the same contents.
+			 *
+			 * */
+			record_child_data_flags(t, size, addr,
+						size > (1 << 23) ?
+						RECORD_OPTIMIZE_ZERO_REGION :
+						RECORD_DEFAULT);
 		}
 		/* TODO: fault on accesses to SHARED mappings we think
 		 * might actually be written */

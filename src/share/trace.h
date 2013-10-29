@@ -140,7 +140,30 @@ void sc_record_data(pid_t tid, int syscall, size_t len, void* buf);
 void record_inst(struct task* context, char* inst);
 
 void record_inst_done(struct task* context);
-void record_child_data(struct task *t, size_t len, void* child_ptr);
+/**
+ * Record |len| bytes of |t|'s memory starting from |child_ptr|.  Uses
+ * |RECORD_DEFAULT| flags (see below).
+ */
+void record_child_data(struct task* t, size_t len, void* child_ptr);
+/**
+ * Same as |record_child_data()|, except that |flags| can be passed to
+ * alter certain behaviors.
+ */
+enum {
+	RECORD_DEFAULT = 0,
+	/**
+	 * If the memory at |child_ptr| is guaranteed to be
+	 * zero-initialized during replay, for example if it's a fresh
+	 * mmap, then if the recorded region is all 0 bytes, rr can
+	 * skip recording the memory (record a no-op read).  This
+	 * optimization reduces the space occupied by the trace, at
+	 * the expense of the overhead to zero-check the read memory
+	 * at |child_ptr|.
+	 */
+	RECORD_OPTIMIZE_ZERO_REGION = 0x1
+};
+void record_child_data_flags(struct task *t, size_t len, void* child_ptr,
+			     int flags);
 
 void record_timestamp(int tid, long int* eax_, long int* edx_);
 void record_child_data_tid(pid_t tid, int event, size_t len, void* child_ptr);

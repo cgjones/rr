@@ -589,13 +589,34 @@ static void write_raw_data(struct task *t, void *buf, size_t to_write)
 }
 
 /**
+ * Return nonzero if all the bytes in |buf| are zero.
+ */
+static int is_zero_region(const void* buf, size_t size)
+{
+	int i;
+	const char* b = buf;
+
+	/* Dear compiler: Please vectorize me. */
+	for (i = 0; i < size; ++i) {
+		if (0 != b[i]) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+void record_child_data(struct task* t, size_t len, void* child_ptr)
+{
+	return record_child_data_flags(t, len, child_ptr, RECORD_DEFAULT);
+}
+
+/**
  * Writes data into the raw_data file and generates a corresponding entry in
  * syscall_input.
  */
-
 #define SMALL_READ_SIZE	4096
-
-void record_child_data(struct task *t, size_t size, void* child_ptr)
+void record_child_data_flags(struct task *t, size_t size, void* child_ptr,
+			     int flags)
 {
 	int state;
 	int event = encode_event(t->ev, &state);
@@ -615,8 +636,13 @@ void record_child_data(struct task *t, size_t size, void* child_ptr)
 		char read_buffer[SMALL_READ_SIZE];
 
 		read_child_usr(t, read_buffer, child_ptr, size);
-		write_raw_data(t, read_buffer, size);
-		read_bytes = size;
+		if ((RECORD_OPTIMIZE_ZERO_REGION & flags)
+		    && is_zero_region(read_buffer, size)) {
+			read_bytes = 0;
+		} else {
+			write_raw_data(t, read_buffer, size);
+			read_bytes = size;
+		}
 		goto record_read;
 	}
 
@@ -624,7 +650,12 @@ void record_child_data(struct task *t, size_t size, void* child_ptr)
 	assert_exec(t, read_bytes == size, "Failed to read %d bytes at %p",
 		    size, child_ptr);
 
-	write_raw_data(t, buf, read_bytes);
+	if ((RECORD_OPTIMIZE_ZERO_REGION & flags)
+	    && is_zero_region(buf, size)) {
+		read_bytes = 0;
+	} else {
+		write_raw_data(t, buf, read_bytes);
+	}
 	sys_free((void**)&buf);
 
 record_read:
