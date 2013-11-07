@@ -254,6 +254,9 @@ static int handle_desched_event(struct task* t, const siginfo_t* si,
 		 || HPC_TIME_SLICE_SIGNAL == sig
 		 || is_arm_desched_event_syscall(t, regs));
 
+	/** */
+	memcpy(&t->regs, regs, sizeof(t->regs));
+
 	if (is_disarm_desched_event_syscall(t, regs)) {
 		debug("  (at disarm-desched, so finished buffered syscall; resuming)");
 		return USR_NOOP;
@@ -552,7 +555,7 @@ static int go_to_a_happy_place(struct task* t,
 			if (HPC_TIME_SLICE_SIGNAL == si->si_signo) {
 				memcpy(si, &tmp_si, sizeof(*si));
 				debug("  upgraded delivery of SIG_TIMESLICE to %s",
-					 signalname(si->si_signo));
+				      signalname(si->si_signo));
 				handle_siginfo_regs(t, si, regs);
 				return -1;
 			}
