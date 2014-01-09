@@ -161,8 +161,12 @@ void init_hpc(struct task* t)
 		hw_int_event = "HW_INTERRUPTS:u";
 		break;
 	case IntelIvyBridge :
-		rbc_event = "BR_INST_RETIRED:COND:u:precise=0";
-		inst_event = "INST_RETIRED:u";
+//		rbc_event = "BR_INST_RETIRED:COND:u:precise=0";
+//		inst_event = "INST_RETIRED:u";
+
+
+		rbc_event = "BR_INST_RETIRED:COND:u";
+		inst_event = "INSTRUCTIONS_RETIRED:u";
 		hw_int_event = "HW_INTERRUPTS:u";
 		break;
 	default: // best guess
@@ -259,7 +263,12 @@ static void cleanup_hpc(struct task* t)
  */
 void start_hpc(struct task *t, int64_t val)
 {
-	t->hpc->rbc.attr.sample_period = val;
+//	t->hpc->rbc.attr.sample_period = val;
+
+
+	t->hpc->inst.attr.sample_period = val;
+
+
 	__start_hpc(t);
 }
 
@@ -268,7 +277,12 @@ void reset_hpc(struct task *t, int64_t val)
 	if (t->hpc->started) {
 		cleanup_hpc(t);
 	}
-	t->hpc->rbc.attr.sample_period = val;
+//	t->hpc->rbc.attr.sample_period = val;
+
+
+	t->hpc->inst.attr.sample_period = val;
+
+
 	__start_hpc(t);
 }
 /**

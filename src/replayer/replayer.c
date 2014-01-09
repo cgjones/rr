@@ -84,7 +84,8 @@
  * perhaps pipeline depth and things of that nature are involved.  But
  * those reasons if they exit are currently not understood.
  */
-#define SKID_SIZE 70
+//#define RBC_SKID_SIZE 70
+#define IRC_SKID_SIZE 70
 
 typedef enum { TRAP_NONE = 0, TRAP_STEPI,
 	       TRAP_BKPT_INTERNAL, TRAP_BKPT_USER } trap_t;
@@ -784,10 +785,11 @@ static int is_debugger_trap(struct task* t, int target_sig,
 
 static void guard_overshoot(struct task* t,
 			    const struct user_regs_struct* target_regs,
-			    int64_t target_rcb, int64_t remaining_rcbs)
+			    int64_t target, int64_t remaining,
+			    const char* unit)
 {
-	int remaining_rcbs_gt_0 = remaining_rcbs >= 0;
-	if (!remaining_rcbs_gt_0) {
+	int remaining_gt_0 = remaining >= 0;
+	if (!remaining_gt_0) {
 		long target_ip = target_regs->eip;
 
 		log_err("Replay diverged.  Dumping register comparison.");
@@ -803,9 +805,9 @@ static void guard_overshoot(struct task* t,
 		}
 		compare_register_files(t, "rep overshoot", &t->regs,
 				       "rec", target_regs, LOG_MISMATCHES);
-		assert_exec(t, remaining_rcbs_gt_0,
-			    "overshot target rcb=%"PRId64" by %"PRId64,
-			    target_rcb, -remaining_rcbs);
+		assert_exec(t, remaining_gt_0,
+			    "overshot target %s=%"PRId64" by %"PRId64,
+			    unit, target, -remaining);
 	}
 }
 
@@ -831,6 +833,7 @@ static void guard_unexpected_signal(struct task* t)
 		    strevent(event));
 }
 
+#if 0
 static int is_same_execution_point(struct task* t,
 				   const struct user_regs_struct* rec_regs,
 				   int64_t rcbs_left,
@@ -871,8 +874,8 @@ static int is_same_execution_point(struct task* t,
  * that will be decremented by branches retired during this attempted
  * step.
  */
-static int advance_to(struct task* t, const struct user_regs_struct* regs,
-		      int sig, int stepi, int64_t* rcb)
+static int advance_to_rbc(struct task* t, const struct user_regs_struct* regs,
+			  int sig, int stepi, int64_t* rcb)
 {
 	pid_t tid = t->tid;
 	void* ip = (void*)regs->eip;
@@ -1081,6 +1084,249 @@ static int advance_to(struct task* t, const struct user_regs_struct* regs,
 
 	return 0;
 }
+#endif
+
+static int is_at_target_insn(struct task* t,
+			     const struct user_regs_struct* rec_regs,
+			     int64_t insns_left,
+			     const struct user_regs_struct* rep_regs)
+{
+	/* TODO: adjust insns here, if not done elsewhere */
+
+	if (0 != insns_left) {
+		debug("  not same execution point: %"PRId64" rcbs left (@%p)",
+		      insns_left, (void*)rec_regs->eip);
+#ifdef DEBUGTAG
+		compare_register_files(t, "(rep)", rep_regs,
+				       "(rec)", rec_regs, LOG_MISMATCHES);
+#endif
+		return 0;
+	}
+
+	compare_register_files(t, "rep", rep_regs, "rec", rec_regs,
+			       BAIL_ON_MISMATCH);
+
+	debug("  same execution point");
+	return 1;
+}
+
+static int advance_to_insn(struct task* t, const struct user_regs_struct* regs,
+			   int sig, int stepi, int64_t* insn)
+{
+	pid_t tid = t->tid;
+	void* ip = (void*)regs->eip;
+	int64_t insns_left;
+
+	assert(t->hpc->rbc.fd > 0);
+	assert(t->child_sig == 0);
+
+	/* Step 1: advance to the target rcb (minus a slack region) as
+	 * quickly as possible by programming the hpc. */
+
+	/* TODO: compute adjusted insns_left */
+
+	insns_left = *insn - read_insts(t->hpc);
+
+	debug("advancing %" PRId64 " insns to reach %" PRId64 "/%p",
+	      insns_left, *insn, ip);
+
+	while (insns_left - IRC_SKID_SIZE > IRC_SKID_SIZE) {
+		if (SIGTRAP == t->child_sig) {
+			/* We proved we're not at the execution
+			 * target, and we haven't set any internal
+			 * breakpoints, and we're not temporarily
+			 * internally single-stepping, so we must have
+			 * hit a debugger breakpoint or the debugger
+			 * was single-stepping the tracee.  (The
+			 * debugging code will verify that.) */
+			return 1;
+		}
+		t->child_sig = 0;
+
+		debug("  programming interrupt for %" PRId64 " insns",
+		      insns_left - IRC_SKID_SIZE);
+		*insn -= read_insts(t->hpc);
+		reset_hpc(t, insns_left - IRC_SKID_SIZE);
+
+		continue_or_step(t, stepi);
+		if (HPC_TIME_SLICE_SIGNAL == t->child_sig
+		    || SIGCHLD == t->child_sig) {
+			/* Tracees can receive SIGCHLD at pretty much
+			 * any time during replay.  If we recorded
+			 * delivery, we'll manually replay it
+			 * eventually (or already have).  Just ignore
+			 * here. */
+			t->child_sig = 0;
+		}
+		guard_unexpected_signal(t);
+
+		/* TODO this assertion won't catch many spurious
+		 * signals; should assert that the siginfo says the
+		 * source is io-ready and the fd is the child's fd. */
+		if (fcntl(t->hpc->rbc.fd, F_GETOWN) != tid) {
+			fatal("Scheduled task %d doesn't own hpc; replay divergence", tid);
+		}
+
+
+		/* TODO: compute adjusted insns_left */
+
+		insns_left = *insn - read_insts(t->hpc);
+	}
+	guard_overshoot(t, regs, *insn, insns_left, "insn");
+
+	/* Step 2: more slowly, find our way to the target rcb and
+	 * execution point.  We set an internal breakpoint on the
+	 * target $ip and then resume execution.  When that *internal*
+	 * breakpoint is hit (i.e., not one incidentally also set on
+	 * that $ip by the debugger), we check again if we're at the
+	 * target rcb and execution point.  If not, we temporarily
+	 * remove the breakpoint, single-step over the insn, and
+	 * repeat.
+	 *
+	 * What we really want to do is set a (precise)
+	 * retired-instruction interrupt and do away with all this
+	 * cruft. */
+	while (insns_left >= 0) {
+		/* Invariants here are
+		 *  o rcbs_left is up-to-date
+		 *  o rcbs_left >= 0
+		 *
+		 * Possible state of the execution of |t|
+		 *  0. at a debugger trap (breakpoint or stepi)
+		 *  1. at an internal breakpoint
+		 *  2. at the execution target
+		 *  3. not at the execution target, but incidentally
+		 *     at the target $ip
+		 *  4. otherwise not at the execution target
+		 *
+		 * Determining whether we're at a debugger trap is
+		 * surprisingly complicated, but we delegate the work
+		 * to |compute_debugger_trap()|.  The rest can be
+		 * straightforwardly computed with rbc value and
+		 * registers. */
+		struct user_regs_struct regs_now;
+		int at_target;
+
+		read_child_registers(tid, &regs_now);
+		at_target = is_at_target_insn(t, regs, insns_left, &regs_now);
+		if (SIGTRAP == t->child_sig) {
+			trap_t trap_type = compute_trap_type(
+				t, ASYNC, sig,
+				at_target ? AT_TARGET : NOT_AT_TARGET,
+				stepi);
+			switch (trap_type) {
+			case TRAP_BKPT_USER:
+			case TRAP_STEPI:
+				/* Case (0) above: interrupt for the
+				 * debugger. */
+				debug("    trap was debugger interrupt %d",
+				      trap_type);
+				return 1;
+			case TRAP_BKPT_INTERNAL:
+				/* Case (1) above: cover the tracks of
+				 * our internal breakpoint, and go
+				 * check again if we're at the
+				 * target. */
+				debug("    trap was for target $ip");
+				/* (The breakpoint would have trapped
+				 * at the $ip one byte beyond the
+				 * target.) */
+				assert(!at_target);
+
+				t->child_sig = 0;
+				regs_now.eip -= sizeof(int_3_insn);
+				write_child_registers(tid, &regs_now);
+				/* We just backed up the $ip, but
+				 * rewound it over an |int $3|
+				 * instruction, which couldn't have
+				 * retired a branch.  So we don't need
+				 * to adjust |rcb_now|. */
+				continue;
+			case TRAP_NONE:
+				/* Otherwise, we must have been forced
+				 * to single-step because the tracee's
+				 * $ip was incidentally the same as
+				 * the target.  Unfortunately, it's
+				 * awkward to assert that here, so we
+				 * don't yet.  TODO. */
+				debug("    (SIGTRAP; stepi'd target $ip)");
+				assert(!stepi);
+				t->child_sig = 0;
+				break;
+			}
+		}
+		/* We had to keep the internal breakpoint set (if it
+		 * was when we entered the loop) for the checks above.
+		 * But now we're either done (at the target) or about
+		 * to resume execution in one of a variety of ways,
+		 * and it's simpler to start out knowing that the
+		 * breakpoint isn't set. */
+		remove_internal_sw_breakpoint(t, ip);
+
+		if (at_target) {
+			/* Case (2) above: done. */
+			return 0;
+		}
+
+		/* At this point, we've proven that we're not at the
+		 * target execution point, and we've ensured the
+		 * internal breakpoint is unset. */
+		if (USE_BREAKPOINT_TARGET && regs->eip != regs_now.eip) {
+			/* Case (4) above: set a breakpoint on the
+			 * target $ip and PTRACE_CONT in an attempt to
+			 * execute as many non-trapped insns as we
+			 * can.  (Unless the debugger is stepping, of
+			 * course.)  Trapping and checking
+			 * are-we-at-target is slow.  It bears
+			 * repeating that the ideal implementation
+			 * would be programming a precise counter
+			 * interrupt (insns-retired best of all), but
+			 * we're forced to be conservative by observed
+			 * imprecise counters.  This should still be
+			 * no slower than single-stepping our way to
+			 * the target execution point. */
+			debug("    breaking on target $ip");
+			set_internal_sw_breakpoint(t, ip);
+			continue_or_step(t, stepi);
+		} else {
+			/* Case (3) above: we can't put a breakpoint
+			 * on the $ip, because resuming execution
+			 * would just trap and we'd be back where we
+			 * started.  Single-step past it. */
+			debug("    (single-stepping over target $ip)");
+			continue_or_step(t, STEPI);
+		}
+
+		if (HPC_TIME_SLICE_SIGNAL == t->child_sig
+		    || SIGCHLD == t->child_sig) {
+			/* See the long comment in "Step 1" above.
+			 *
+			 * We don't usually expect a time-slice signal
+			 * during this phase, but it's possible for a
+			 * SIGCHLD to interrupt the previous step just
+			 * as the tracee enters the slack region,
+			 * i.e., where an rbc signal was just about to
+			 * fire.  (There's not really a non-racy way
+			 * to disable the rbc interrupt, and we need
+			 * to keep the counter running for overshoot
+			 * checking anyway.)  So this is the most
+			 * convenient way to squelch that "spurious"
+			 * signal. */
+			t->child_sig = 0;
+		}
+		guard_unexpected_signal(t);
+
+		/* Maintain the "'rcbs_left'-is-up-to-date"
+		 * invariant. */
+
+		/* TODO: compute adjusted insns_left */
+
+		insns_left = *insn - read_insts(t->hpc);
+	}
+	guard_overshoot(t, regs, *insn, insns_left, "insn");
+
+	return 0;
+}
 
 static void emulate_signal_delivery(struct task* oldtask)
 {
@@ -1110,6 +1356,7 @@ static void emulate_signal_delivery(struct task* oldtask)
 	validate_args(trace->stop_reason, -1, t);
 }
 
+#if 0
 static void assert_at_recorded_rcb(struct task* t, int event)
 {
 	static const int64_t rbc_slack = 0;
@@ -1122,6 +1369,22 @@ static void assert_at_recorded_rcb(struct task* t, int event)
 			|| llabs(rbc_now - t->trace.rbc) <= rbc_slack),
 		    "rbc mismatch for '%s'; expected %"PRId64", got %"PRId64,
 		    strevent(event), t->trace.rbc, read_rbc(t->hpc));
+}
+#endif
+
+static void assert_at_recorded_exec_point(struct task* t, int event)
+{
+	if (!validate || !t->hpc->started) {
+		return;
+	}
+	assert_exec(t, t->trace.rbc == read_rbc(t->hpc),
+		    "rbc mismatch for '%s'; expected %"PRId64", got %"PRId64,
+		    strevent(event), t->trace.rbc, read_rbc(t->hpc));
+#if 0
+	assert_exec(t, t->trace.insts == read_insts(t->hpc),
+		    "irc mismatch for '%s'; expected %"PRId64", got %"PRId64,
+		    strevent(event), t->trace.insts, read_insts(t->hpc));
+#endif
 }
 
 /**
@@ -1146,7 +1409,8 @@ static int emulate_deterministic_signal(struct task* t,
 	assert_exec(t, t->child_sig == sig,
 		    "Replay got unrecorded signal %d (expecting %d)",
 		    t->child_sig, sig);
-	assert_at_recorded_rcb(t, event);
+//	assert_at_recorded_rcb(t, event);
+	assert_at_recorded_exec_point(t, event);
 
 	if (SIG_SEGV_RDTSC == event) {
 		write_child_main_registers(tid, &t->trace.recorded_regs);
@@ -1167,9 +1431,10 @@ static int emulate_deterministic_signal(struct task* t,
  */
 static int emulate_async_signal(struct task* t,
 				const struct user_regs_struct* regs, int sig,
-				int stepi, int64_t* rcb)
+				int stepi, int64_t* insn)//int64_t* rcb)
 {
-	if (advance_to(t, regs, 0, stepi, rcb)) {
+//	if (advance_to(t, regs, 0, stepi, rcb)) {
+	if (advance_to_insn(t, regs, 0, stepi, insn)) {
 		return 1;
 	}
 	if (sig) {
@@ -1430,7 +1695,8 @@ static int try_one_trace_step(struct task* t,
 					    step->target.regs,
 					    step->target.signo,
 					    stepi,
-					    &step->target.rcb);
+//					    &step->target.rcb);
+					    &step->target.insn);
 	case TSTEP_FLUSH_SYSCALLBUF:
 		return flush_syscallbuf(t, step, stepi);
 	case TSTEP_DESCHED:
@@ -1523,7 +1789,11 @@ static void replay_one_trace_frame(struct dbg_context* dbg,
 		break;
 	case USR_SCHED:
 		step.action = TSTEP_PROGRAM_ASYNC_SIGNAL_INTERRUPT;
-		step.target.rcb = t->trace.rbc;
+//		step.target.rcb = t->trace.rbc;
+
+		/* TODO compute real target */
+
+		step.target.insn = t->trace.insts;
 		step.target.regs = &t->trace.recorded_regs;
 		step.target.signo = 0;
 		break;
@@ -1542,7 +1812,11 @@ static void replay_one_trace_frame(struct dbg_context* dbg,
 			assert(FIRST_ASYNC_SIGNAL <= event
 			       && event <= LAST_ASYNC_SIGNAL);
 			step.action = TSTEP_PROGRAM_ASYNC_SIGNAL_INTERRUPT;
-			step.target.rcb = t->trace.rbc;
+//			step.target.rcb = t->trace.rbc;
+
+			/* TODO compute real target */
+
+			step.target.insn = t->trace.insts;
 			step.target.regs = &t->trace.recorded_regs;
 			step.target.signo = -event;
 			stop_sig = step.target.signo;
@@ -1560,11 +1834,15 @@ static void replay_one_trace_frame(struct dbg_context* dbg,
 	 * execution in the BUFFER_FLUSH didn't happen by resetting
 	 * the rbc and compensating down the target rcb. */
 	if (TSTEP_PROGRAM_ASYNC_SIGNAL_INTERRUPT == step.action) {
-		uint64_t rcb_now = read_rbc(t->hpc);
+		uint64_t irc_now = read_insts(t->hpc);
 
-		assert(step.target.rcb >= rcb_now);
+//		assert(step.target.rcb >= rcb_now);
+		assert(step.target.insn >= irc_now);
 
-		step.target.rcb -= rcb_now;
+		/* TODO: make sure we keep track of interrupts and
+		 * exceptions properly here */
+
+		step.target.insn -= irc_now;
 		reset_hpc(t, 0);
 	}
 
@@ -1631,7 +1909,8 @@ static void replay_one_trace_frame(struct dbg_context* dbg,
 		 * interrupts and other implementation details.  This
 		 * is checked in |advance_to()| anyway. */
 		if (TSTEP_PROGRAM_ASYNC_SIGNAL_INTERRUPT != step.action) {
-			assert_at_recorded_rcb(t, event);
+//			assert_at_recorded_rcb(t, event);
+			assert_at_recorded_exec_point(t, event);
 		}
 		reset_hpc(t, 0);
 	}
