@@ -89,6 +89,10 @@ struct trace_frame {
 	int64_t rbc;
 	int64_t insts;
 
+
+	int64_t cs;
+
+
 	struct user_regs_struct recorded_regs;
 	STRUCT_DELIMITER(end_exec_info);
 };

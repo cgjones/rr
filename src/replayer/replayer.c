@@ -8,6 +8,13 @@
 # define USE_BREAKPOINT_TARGET 1
 #endif
 
+
+
+//#undef USE_BREAKPOINT_TARGET
+//#define USE_BREAKPOINT_TARGET 0
+
+
+
 #define _GNU_SOURCE
 
 #include "replayer.h"
@@ -862,6 +869,79 @@ static int is_same_execution_point(struct task* t,
 	return 1;
 }
 
+static struct {
+	int64_t desched;
+	int64_t buffered_syscall;
+	int64_t debugger_stepi;
+	int64_t debugger_bkpt;
+	int64_t internal_stepi;
+	int64_t internal_bkpt;
+} extra_insns;
+int64_t extra_insns_restart_syscall;
+
+static void assert_at_recorded_insn(struct task* t, int event)
+{
+	int64_t rec_irc = t->trace.insts;
+	int64_t rec_ints = t->trace.hw_interrupts;
+	int64_t rec_faults = t->trace.page_faults;
+	int64_t rec_cs = t->trace.cs;
+
+	int64_t irc = read_insts(t->hpc);
+	int64_t ints = read_hw_int(t->hpc);
+	int64_t faults = read_page_faults(t->hpc);
+	int64_t cs = read_cs(t->hpc);
+	int64_t rep_irc = irc -
+			  extra_insns.desched -
+			  extra_insns.buffered_syscall -
+			  extra_insns.debugger_bkpt -
+			  extra_insns.debugger_stepi -
+			  extra_insns.internal_bkpt -
+			  extra_insns.internal_stepi -
+			  extra_insns_restart_syscall;
+
+	int64_t rec_insns = rec_irc - rec_faults;
+	int64_t insns = rep_irc - faults;
+
+	memset(&extra_insns, 0, sizeof(extra_insns));
+	extra_insns_restart_syscall = 0;
+
+	if (STATE_SYSCALL_EXIT == t->trace.state) {
+//		fprintf(stderr, "  (ignoring syscall exit)\n");
+		return;
+	}
+
+#if 0
+	log_err("insns '%s'; expected %"PRId64", got %"PRId64 "\n"
+		"{ rec_irc:%lld rec_ints:%lld rec_faults:%lld rec_cs:%lld }\n"
+		"{     irc:%lld     ints:%lld     faults:%lld     cs:%lld}\n"
+		"{     raw:%lld }\n"
+		"{ bkpts:%lld stepis:%lld }",
+		strevent(event), rec_insns, insns,
+		rec_irc, rec_ints, rec_faults, rec_cs,
+		irc - bkpts - stepis, ints, faults, cs,
+		irc,
+		bkpts, stepis);
+
+	if (rec_insns != insns) {
+		fprintf(stderr, "^^^^^^^^ DIVERGE!!!! %s: rec:%lld rep:%lld ^^^^^^^^^^\n",
+			strevent(event), rec_insns, insns);
+	}
+#else
+	assert_exec(
+		t, rec_insns == insns,
+		"insns mismatch at '%s'; expected %"PRId64", got %"PRId64 "\n"
+		"{ rec_irc:%lld rec_ints:%lld rec_faults:%lld rec_cs:%lld }\n"
+		"{     irc:%lld     ints:%lld     faults:%lld     cs:%lld }\n"
+		"{    (raw:%lld) }",
+		strevent(event), rec_insns, insns,
+		rec_irc, rec_ints, rec_faults, rec_cs,
+		rep_irc, ints, faults, cs,
+		irc);
+#endif
+}
+
+
+
 /**
  * Run execution forwards for |t| until |*rcb| is reached, and the $ip
  * reaches the recorded $ip.  Return 0 if successful or 1 if an
@@ -930,6 +1010,12 @@ static int advance_to(struct task* t, const struct user_regs_struct* regs,
 	}
 	guard_overshoot(t, regs, *rcb, rcbs_left);
 
+
+
+	assert_exec(t, SIGTRAP != t->child_sig, "");
+
+
+
 	/* Step 2: more slowly, find our way to the target rcb and
 	 * execution point.  We set an internal breakpoint on the
 	 * target $ip and then resume execution.  When that *internal*
@@ -980,6 +1066,11 @@ static int advance_to(struct task* t, const struct user_regs_struct* regs,
 				      trap_type);
 				return 1;
 			case TRAP_BKPT_INTERNAL:
+
+
+				++extra_insns.internal_bkpt;
+
+
 				/* Case (1) above: cover the tracks of
 				 * our internal breakpoint, and go
 				 * check again if we're at the
@@ -1000,6 +1091,11 @@ static int advance_to(struct task* t, const struct user_regs_struct* regs,
 				 * to adjust |rcb_now|. */
 				continue;
 			case TRAP_NONE:
+
+
+				++extra_insns.internal_stepi;
+
+
 				/* Otherwise, we must have been forced
 				 * to single-step because the tracee's
 				 * $ip was incidentally the same as
@@ -1021,6 +1117,11 @@ static int advance_to(struct task* t, const struct user_regs_struct* regs,
 		remove_internal_sw_breakpoint(t, ip);
 
 		if (at_target) {
+
+
+//			assert_at_recorded_insn(t, t->trace.stop_reason);
+
+
 			/* Case (2) above: done. */
 			return 0;
 		}
@@ -1112,16 +1213,17 @@ static void emulate_signal_delivery(struct task* oldtask)
 
 static void assert_at_recorded_rcb(struct task* t, int event)
 {
-	static const int64_t rbc_slack = 0;
-	int64_t rbc_now = t->hpc->started ? read_rbc(t->hpc) : 0;
-
-	if (!validate) {
+	if (!validate || !t->hpc->started) {
 		return;
 	}
-	assert_exec(t, (!t->hpc->started
-			|| llabs(rbc_now - t->trace.rbc) <= rbc_slack),
+	assert_exec(t, t->trace.rbc == read_rbc(t->hpc),
 		    "rbc mismatch for '%s'; expected %"PRId64", got %"PRId64,
 		    strevent(event), t->trace.rbc, read_rbc(t->hpc));
+
+
+
+	assert_at_recorded_insn(t, event);
+
 }
 
 /**
@@ -1146,13 +1248,13 @@ static int emulate_deterministic_signal(struct task* t,
 	assert_exec(t, t->child_sig == sig,
 		    "Replay got unrecorded signal %d (expecting %d)",
 		    t->child_sig, sig);
-	assert_at_recorded_rcb(t, event);
 
 	if (SIG_SEGV_RDTSC == event) {
 		write_child_main_registers(tid, &t->trace.recorded_regs);
 		/* We just "delivered" this pseudosignal. */
 		t->child_sig = 0;
 	} else {
+		assert_at_recorded_rcb(t, event);
 		emulate_signal_delivery(t);
 	}
 
@@ -1197,6 +1299,8 @@ static int skip_desched_ioctl(struct task* t,
 	}
 	ds->state = DESCHED_EXIT;
 
+	++extra_insns.desched;
+
 	read_child_registers(t->tid, &t->regs);
 	is_desched_syscall = (DESCHED_ARM == ds->type ?
 			      is_arm_desched_event_syscall(t, &t->regs) :
@@ -1211,6 +1315,9 @@ static int skip_desched_ioctl(struct task* t,
 	t->regs.eax = 0;
 	write_child_registers(t->tid, &t->regs);
 	step_exit_syscall_emu(t);
+
+	++extra_insns.desched;
+
 	return 0;
 }
 
@@ -1316,6 +1423,11 @@ static int flush_one_syscall(struct task* t,
 		if ((ret = cont_syscall_boundary(t, EMU, stepi))) {
 			return ret;
 		}
+
+
+		++extra_insns.buffered_syscall;
+
+
 		read_child_registers(tid, &regs);
 		assert_at_buffered_syscall(t, &regs, call);
 		flush->state = FLUSH_EXIT;
@@ -1330,6 +1442,10 @@ static int flush_one_syscall(struct task* t,
 		regs.eax = rec->ret;
 		write_child_registers(tid, &regs);
 		step_exit_syscall_emu(t);
+
+
+		++extra_insns.buffered_syscall;
+
 
 		/* XXX not pretty; should have this
 		 * actually-replay-parts-of-trace logic centralized */
@@ -1371,6 +1487,10 @@ static int flush_one_syscall(struct task* t,
 static int flush_syscallbuf(struct task* t, struct rep_trace_step* step,
 			    int stepi)
 {
+
+	int nrbuff = 0;
+
+
 	struct rep_flush_state* flush = &step->flush;
 
 	if (flush->need_buffer_restore) {
@@ -1401,7 +1521,18 @@ static int flush_syscallbuf(struct task* t, struct rep_trace_step* step,
 
 		debug("  %d bytes remain to flush",
 		      flush->num_rec_bytes_remaining);
+
+
+		++nrbuff;
+
+
 	}
+
+
+
+//	log_err("%d: flushed %d", get_global_time(), nrbuff);
+
+
 	return 0;
 }
 
@@ -1562,6 +1693,13 @@ static void replay_one_trace_frame(struct dbg_context* dbg,
 	if (TSTEP_PROGRAM_ASYNC_SIGNAL_INTERRUPT == step.action) {
 		uint64_t rcb_now = read_rbc(t->hpc);
 
+
+
+
+		assert_exec(t, rcb_now == 0, "");
+
+
+
 		assert(step.target.rcb >= rcb_now);
 
 		step.target.rcb -= rcb_now;
@@ -1584,11 +1722,21 @@ static void replay_one_trace_frame(struct dbg_context* dbg,
 			 * right before it. */
 			regs.eip -= sizeof(int_3_insn);
 			write_child_registers(t->tid, &regs);
+
+
+			++extra_insns.debugger_bkpt;
+
+
 		} else {
 			debug("  finished debugger stepi");
 			/* Successful stepi.  Nothing else to do. */
 			assert(DREQ_STEP == req.type
 			       && req.target == get_threadid(t));
+
+
+			++extra_insns.debugger_stepi;
+
+
 		}
 		/* Don't restart with SIGTRAP anywhere. */
 		t->child_sig = 0;
@@ -1633,6 +1781,14 @@ static void replay_one_trace_frame(struct dbg_context* dbg,
 		if (TSTEP_PROGRAM_ASYNC_SIGNAL_INTERRUPT != step.action) {
 			assert_at_recorded_rcb(t, event);
 		}
+
+
+		else {
+			memset(&extra_insns, 0, sizeof(extra_insns));
+			extra_insns_restart_syscall = 0;
+		}
+
+
 		reset_hpc(t, 0);
 	}
 	debug_memory(t);

@@ -941,6 +941,10 @@ static void maybe_verify_tracee_saved_data(struct task* t,
 	sys_free((void**)&buf);
 }
 
+
+extern int64_t extra_insns_restart_syscall;
+
+
 void rep_process_syscall(struct task* t, struct rep_trace_step* step)
 {
 	int syscall = t->trace.stop_reason; /* FIXME: don't shadow syscall() */
@@ -986,6 +990,11 @@ void rep_process_syscall(struct task* t, struct rep_trace_step* step)
 			 * continuing on from the interrupted
 			 * syscall. */
 			step->action = TSTEP_RETIRE;
+
+
+			--extra_insns_restart_syscall;
+
+
 			return;
 		}
 	}
@@ -1314,8 +1323,8 @@ void rep_process_syscall(struct task* t, struct rep_trace_step* step)
 	case SYS_rt_sigreturn:
 		if (state == STATE_SYSCALL_ENTRY) {
 			enter_syscall_emu(t, syscall);
-			finish_syscall_emu(t);
 		} else {
+			finish_syscall_emu(t);
 			write_child_main_registers(t->tid,
 						   &trace->recorded_regs);
 		}

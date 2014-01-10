@@ -79,7 +79,7 @@ struct task* rep_sched_get_thread()
 	 * process debugger requests theoretically unbounded, but
 	 * maybe we don't care in practice, or that lag is worth the
 	 * gain from the optimization. */
-	if (trace.stop_reason == USR_SCHED) {
+	if (0 && trace.stop_reason == USR_SCHED) {
 		int combined = 0;
 		struct trace_frame next_trace;
 

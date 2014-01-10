@@ -146,10 +146,10 @@ void dump_trace_frame(FILE* out, const struct trace_frame* f)
 	}
 
 	fprintf(out,
-"\n  hw_ints:%lld, faults:%lld, rbc:%lld, insns:%lld"
+"\n  hw_ints:%lld, faults:%lld, rbc:%lld, insns:%lld, cs:%lld"
 "\n  eax:0x%lx ebx:0x%lx ecx:0x%lx edx:0x%lx esi:0x%lx edi:0x%lx ebp:0x%lx"
 "\n  eip:0x%lx esp:0x%lx eflags:0x%lx orig_eax:%ld\n}\n",
-		f->hw_interrupts, f->page_faults, f->rbc, f->insts,
+		f->hw_interrupts, f->page_faults, f->rbc, f->insts, f->cs,
 		r->eax, r->ebx, r->ecx, r->edx, r->esi, r->edi, r->ebp,
 		r->eip, r->esp, r->eflags, r->orig_eax);
 }
@@ -456,6 +456,11 @@ static void encode_trace_frame(struct task* t, const struct event* ev,
 		frame->page_faults = read_page_faults(t->hpc);
 		frame->rbc = read_rbc(t->hpc);
 		frame->insts = read_insts(t->hpc);
+
+
+		frame->cs = read_cs(t->hpc);
+
+
 		read_child_registers(t->tid, &frame->recorded_regs);
 	}
 }

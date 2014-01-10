@@ -2,7 +2,8 @@
 
 #include "rrutil.h"
 
-#define NUM_ITERATIONS (1 << 30)
+//#define NUM_ITERATIONS (1 << 30)
+#define NUM_ITERATIONS (1 << 24)
 
 static void breakpoint(void) {
 	int break_here = 1;

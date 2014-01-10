@@ -37,6 +37,9 @@ struct hpc_context {
 	hpc_event_t rbc;
 	hpc_event_t page_faults;
 	hpc_event_t hw_int;
+
+
+	hpc_event_t cs;
 };
 
 void init_libpfm(void);
@@ -56,5 +59,8 @@ int64_t read_rbc(struct hpc_context *counters);
 int64_t read_rbc_down(struct hpc_context *counters);
 int64_t read_hw_int(struct hpc_context* counters);
 int64_t read_insts(struct hpc_context *counters);
+
+
+int64_t read_cs(struct hpc_context* counters);
 
 #endif /* HPC_H_ */
