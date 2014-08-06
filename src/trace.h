@@ -59,6 +59,11 @@ struct trace_frame {
 	int64_t hw_interrupts;
 	int64_t page_faults;
 	int64_t insts;
+
+
+	int64_t cs;
+
+
 #endif
 
 	Registers recorded_regs;

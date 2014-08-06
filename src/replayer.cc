@@ -162,6 +162,81 @@ static int debugger_params_pipe[2];
 static uint64_t instruction_trace_at_event_start = 0;
 static uint64_t instruction_trace_at_event_last = 0;
 
+
+
+static struct {
+	int64_t desched;
+	int64_t buffered_syscall;
+	int64_t debugger_stepi;
+	int64_t debugger_bkpt;
+	int64_t internal_stepi;
+	int64_t internal_bkpt;
+} extra_insns;
+int64_t extra_insns_restart_syscall;
+
+static void assert_at_recorded_insn(struct task* t, int event)
+{
+	int64_t rec_irc = t->trace.insts;
+	int64_t rec_ints = t->trace.hw_interrupts;
+	int64_t rec_faults = t->trace.page_faults;
+	int64_t rec_cs = t->trace.cs;
+
+	int64_t irc = read_insts(t->hpc);
+	int64_t ints = read_hw_int(t->hpc);
+	int64_t faults = read_page_faults(t->hpc);
+	int64_t cs = read_cs(t->hpc);
+	int64_t rep_irc = irc -
+			  extra_insns.desched -
+			  extra_insns.buffered_syscall -
+			  extra_insns.debugger_bkpt -
+			  extra_insns.debugger_stepi -
+			  extra_insns.internal_bkpt -
+			  extra_insns.internal_stepi -
+			  extra_insns_restart_syscall;
+
+	int64_t rec_insns = rec_irc - rec_faults;
+	int64_t insns = rep_irc - faults;
+
+	memset(&extra_insns, 0, sizeof(extra_insns));
+	extra_insns_restart_syscall = 0;
+
+	if (STATE_SYSCALL_EXIT == t->trace.state) {
+//		fprintf(stderr, "  (ignoring syscall exit)\n");
+		return;
+	}
+
+#if 0
+	log_err("insns '%s'; expected %"PRId64", got %"PRId64 "\n"
+		"{ rec_irc:%lld rec_ints:%lld rec_faults:%lld rec_cs:%lld }\n"
+		"{     irc:%lld     ints:%lld     faults:%lld     cs:%lld}\n"
+		"{     raw:%lld }\n"
+		"{ bkpts:%lld stepis:%lld }",
+		strevent(event), rec_insns, insns,
+		rec_irc, rec_ints, rec_faults, rec_cs,
+		irc - bkpts - stepis, ints, faults, cs,
+		irc,
+		bkpts, stepis);
+
+	if (rec_insns != insns) {
+		fprintf(stderr, "^^^^^^^^ DIVERGE!!!! %s: rec:%lld rep:%lld ^^^^^^^^^^\n",
+			strevent(event), rec_insns, insns);
+	}
+#else
+	assert_exec(
+		t, rec_insns == insns,
+		"insns mismatch at '%s'; expected %"PRId64", got %"PRId64 "\n"
+		"{ rec_irc:%lld rec_ints:%lld rec_faults:%lld rec_cs:%lld }\n"
+		"{     irc:%lld     ints:%lld     faults:%lld     cs:%lld }\n"
+		"{    (raw:%lld) }",
+		strevent(event), rec_insns, insns,
+		rec_irc, rec_ints, rec_faults, rec_cs,
+		rep_irc, ints, faults, cs,
+		irc);
+#endif
+}
+
+
+
 static void debug_memory(Task* t)
 {
 	if (should_dump_memory(t, t->current_trace_frame())) {
@@ -636,7 +711,12 @@ static Task* schedule_task(ReplaySession& session, Task** intr_t,
 	// Subsequent reschedule-events of the same thread can be
 	// combined to a single event.  This meliorization is a
 	// tremendous win.
-	if (session.current_trace_frame().ev.type == EV_SCHED) {
+	if (0 &&
+
+
+	    session.current_trace_frame().ev.type == EV_SCHED) {
+
+
 		struct trace_frame next_trace = session.ifstream().peek_frame();
 		while (EV_SCHED == next_trace.ev.type
 		       && next_trace.tid == t->rec_tid
@@ -1161,6 +1241,11 @@ static int advance_to(Task* t, const Registers* regs,
 				}
 				return 1;
 			case TRAP_BKPT_INTERNAL: {
+
+
+				++extra_insns.internal_bkpt;
+
+
 				/* Case (1) above: cover the tracks of
 				 * our internal breakpoint, and go
 				 * check again if we're at the
@@ -1181,6 +1266,11 @@ static int advance_to(Task* t, const Registers* regs,
 				continue;
 			}
 			case TRAP_NONE:
+
+
+				++extra_insns.internal_stepi;
+
+
 				/* Otherwise, we must have been forced
 				 * to single-step because the tracee's
 				 * $ip was incidentally the same as
@@ -1205,6 +1295,12 @@ static int advance_to(Task* t, const Registers* regs,
 		}
 
 		if (at_target) {
+
+
+//			assert_at_recorded_insn(t, t->trace.stop_reason);
+
+
+
 			// Adjust dynamic rcb count to match trace, in case
 			// there was slack.
 			t->set_rbc_count(rcb);
@@ -1346,6 +1442,11 @@ static void check_rcb_consistency(Task* t, const Event& ev)
 		<< t->current_trace_frame().rbc <<", got "<< rcb_now <<"";
 	// Sync task rcb with trace rcb so we don't keep accumulating errors
 	t->set_rbc_count(trace_rcb);
+
+
+	assert_at_recorded_insn(t, event);
+
+
 }
 
 /**
@@ -1371,6 +1472,10 @@ static int emulate_deterministic_signal(struct dbg_context* dbg, Task* t,
 		<< "Replay got unrecorded signal "<< t->child_sig
 		<<" (expecting "<< sig <<")";
 	check_rcb_consistency(t, ev);
+
+
+	assert_at_recorded_rcb(t, event);
+
 
 	if (EV_SEGV_RDTSC == ev.type()) {
 		t->set_regs(t->current_trace_frame().recorded_regs);
@@ -1423,6 +1528,10 @@ static int skip_desched_ioctl(Task* t,
 	}
 	ds->state = DESCHED_EXIT;
 
+
+	++extra_insns.desched;
+
+
 	is_desched_syscall = (DESCHED_ARM == ds->type ?
 			      t->is_arm_desched_event_syscall() :
 			      t->is_disarm_desched_event_syscall());
@@ -1438,6 +1547,11 @@ static int skip_desched_ioctl(Task* t,
 	r.set_syscall_result(0);
 	t->set_regs(r);
 	t->finish_emulated_syscall();
+
+
+	++extra_insns.desched;
+
+
 	return 0;
 }
 
@@ -1605,6 +1719,11 @@ static int flush_one_syscall(Task* t, int stepi)
 		if ((ret = cont_syscall_boundary(t, emu, stepi))) {
 			return ret;
 		}
+
+
+		++extra_insns.buffered_syscall;
+
+
 		assert_at_buffered_syscall(t, call);
 		assert_same_rec(t, rec_rec, child_rec);
 		flush->state = FLUSH_EXIT;
@@ -1636,6 +1755,10 @@ static int flush_one_syscall(Task* t, int stepi)
 		if (emu) {
 			t->finish_emulated_syscall();
 		}
+
+
+		++extra_insns.buffered_syscall;
+
 
 		switch (call) {
 		case SYS_futex:
@@ -1679,6 +1802,11 @@ static int flush_one_syscall(Task* t, int stepi)
  */
 static int flush_syscallbuf(Task* t, int stepi)
 {
+
+
+	int nrbuff = 0;
+
+
 	prepare_syscallbuf_records(t);
 
 	struct rep_flush_state* flush =
@@ -1703,7 +1831,17 @@ static int flush_syscallbuf(Task* t, int stepi)
 
 		LOG(debug) <<"  "<< flush->num_rec_bytes_remaining
 			   <<" bytes remain to flush";
+
+
+		++nrbuff;
+
+
 	}
+
+
+	LOG(error) << t->trace_time() <<": flushed "<< nrbuff;
+
+
 	return 0;
 }
 
@@ -2016,6 +2154,11 @@ static bool replay_one_trace_frame(struct dbg_context* dbg,
 			// breakpoint instruction.  Move $ip back
 			// right before it.
 			t->move_ip_before_breakpoint();
+
+
+			++extra_insns.debugger_bkpt;
+
+
 		} else if (DS_SINGLESTEP & t->debug_status()) {
 			LOG(debug) <<"  finished debugger stepi";
 			/* Successful stepi.  Nothing else to do. */

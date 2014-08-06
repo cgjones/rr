@@ -23,7 +23,7 @@
 
 // Define this macro to enable perf counters that may be interesting
 // for experimentation, but aren't necessary for core functionality.
-//#define HPC_ENABLE_EXTRA_PERF_COUNTERS
+#define HPC_ENABLE_EXTRA_PERF_COUNTERS
 
 class Task;
 
@@ -41,6 +41,11 @@ struct hpc_context {
 	hpc_event_t inst;
 	hpc_event_t page_faults;
 	hpc_event_t hw_int;
+
+
+	hpc_event_t cs;
+
+
 #endif
 };
 
@@ -59,6 +64,11 @@ int64_t read_page_faults(struct hpc_context *counters);
 int64_t read_rbc_down(struct hpc_context *counters);
 int64_t read_hw_int(struct hpc_context* counters);
 int64_t read_insts(struct hpc_context *counters);
+
+
+int64_t read_cs(struct hpc_context* counters);
+
+
 #endif
 
 #endif /* HPC_H_ */

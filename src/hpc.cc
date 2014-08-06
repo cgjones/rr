@@ -204,6 +204,11 @@ static void __start_hpc(Task* t)
 	start_counter(t, counters->group_leader, &counters->hw_int);
 	start_counter(t, counters->group_leader, &counters->inst);
 	start_counter(t, counters->group_leader, &counters->page_faults);
+
+
+	start_counter(t, counters->group_leader, &counters->cs);
+
+
 #endif
 
 	struct f_owner_ex own;
@@ -233,6 +238,11 @@ void stop_hpc(Task* t)
 	stop_counter(t, &counters->hw_int);
 	stop_counter(t, &counters->inst);
 	stop_counter(t, &counters->page_faults);
+
+
+	stop_counter(t, &counters->cs);
+
+
 #endif
 }
 
@@ -247,6 +257,11 @@ static void cleanup_hpc(Task* t)
 	close(counters->hw_int.fd);
 	close(counters->inst.fd);
 	close(counters->page_faults.fd);
+
+
+	sys_close(counters->cs.fd);
+
+
 #endif
 	counters->started = false;
 }
@@ -302,4 +317,12 @@ int64_t read_page_faults(struct hpc_context* hpc)
 {
 	return read_counter(hpc, hpc->page_faults.fd);
 }
+
+
+int64_t read_cs(struct hpc_context* counters)
+{
+	return read_counter(hpc, counters->cs.fd);
+}
+
+
 #endif

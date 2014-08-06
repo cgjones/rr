@@ -784,6 +784,11 @@ Task::record_event(const Event& ev)
 		frame.hw_interrupts = read_hw_int(hpc);
 		frame.page_faults = read_page_faults(hpc);
 		frame.insts = read_insts(hpc);
+
+
+		frame->cs = read_cs(hpc);
+
+
 #endif
 		frame.recorded_regs = regs();
 		if (record_extra_regs(ev)) {
