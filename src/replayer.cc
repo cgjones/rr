@@ -174,12 +174,13 @@ static struct {
 } extra_insns;
 int64_t extra_insns_restart_syscall;
 
-static void assert_at_recorded_insn(struct task* t, int event)
+static void assert_at_recorded_insn(Task* t)
 {
-	int64_t rec_irc = t->trace.insts;
-	int64_t rec_ints = t->trace.hw_interrupts;
-	int64_t rec_faults = t->trace.page_faults;
-	int64_t rec_cs = t->trace.cs;
+	struct trace_frame& frame = t->replay_session().current_trace_frame();
+	int64_t rec_irc = frame.insts;
+	int64_t rec_ints = frame.hw_interrupts;
+	int64_t rec_faults = frame.page_faults;
+	int64_t rec_cs = frame.cs;
 
 	int64_t irc = read_insts(t->hpc);
 	int64_t ints = read_hw_int(t->hpc);
@@ -200,39 +201,19 @@ static void assert_at_recorded_insn(struct task* t, int event)
 	memset(&extra_insns, 0, sizeof(extra_insns));
 	extra_insns_restart_syscall = 0;
 
-	if (STATE_SYSCALL_EXIT == t->trace.state) {
+	if (STATE_SYSCALL_EXIT == frame.ev.state) {
 //		fprintf(stderr, "  (ignoring syscall exit)\n");
 		return;
 	}
 
-#if 0
-	log_err("insns '%s'; expected %"PRId64", got %"PRId64 "\n"
-		"{ rec_irc:%lld rec_ints:%lld rec_faults:%lld rec_cs:%lld }\n"
-		"{     irc:%lld     ints:%lld     faults:%lld     cs:%lld}\n"
-		"{     raw:%lld }\n"
-		"{ bkpts:%lld stepis:%lld }",
-		strevent(event), rec_insns, insns,
-		rec_irc, rec_ints, rec_faults, rec_cs,
-		irc - bkpts - stepis, ints, faults, cs,
-		irc,
-		bkpts, stepis);
-
-	if (rec_insns != insns) {
-		fprintf(stderr, "^^^^^^^^ DIVERGE!!!! %s: rec:%lld rep:%lld ^^^^^^^^^^\n",
-			strevent(event), rec_insns, insns);
-	}
-#else
-	assert_exec(
-		t, rec_insns == insns,
-		"insns mismatch at '%s'; expected %"PRId64", got %"PRId64 "\n"
-		"{ rec_irc:%lld rec_ints:%lld rec_faults:%lld rec_cs:%lld }\n"
-		"{     irc:%lld     ints:%lld     faults:%lld     cs:%lld }\n"
-		"{    (raw:%lld) }",
-		strevent(event), rec_insns, insns,
-		rec_irc, rec_ints, rec_faults, rec_cs,
-		rep_irc, ints, faults, cs,
-		irc);
-#endif
+	ASSERT(t, rec_insns == insns)
+		<< "insns diverge @ '"<< Event(frame.ev).str() <<"': expected "
+		<< rec_insns <<", got "<< insns <<"\n"
+		<< "{ rec_irc:"<< rec_irc <<" rec_ints:"<< rec_ints
+		<<" rec_faults:"<< rec_faults <<" rec_cs:" << rec_cs <<" }\n"
+		<<"{     irc:"<< rep_irc <<"     ints:" << ints <<"     faults:"
+		<< faults <<"     cs:" << cs <<" }\n"
+		<<"{    (raw:"<< irc <<") }";
 }
 
 
@@ -1444,7 +1425,7 @@ static void check_rcb_consistency(Task* t, const Event& ev)
 	t->set_rbc_count(trace_rcb);
 
 
-	assert_at_recorded_insn(t, event);
+	assert_at_recorded_insn(t);
 
 
 }
@@ -1474,7 +1455,7 @@ static int emulate_deterministic_signal(struct dbg_context* dbg, Task* t,
 	check_rcb_consistency(t, ev);
 
 
-	assert_at_recorded_rcb(t, event);
+	assert_at_recorded_insn(t);
 
 
 	if (EV_SEGV_RDTSC == ev.type()) {

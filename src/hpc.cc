@@ -166,6 +166,12 @@ void init_hpc(Task* t)
 			      RAW_EVENT);
 	libpfm_event_encoding(&(counters->page_faults.attr), page_faults_event,
 			      SW_EVENT);
+
+
+	libpfm_event_encoding(&counters->cs.attr,
+			      "PERF_COUNT_SW_CONTEXT_SWITCHES", SW_EVENT);
+
+
 #else
 	(void)inst_event;
 	(void)hw_int_event;
@@ -259,7 +265,7 @@ static void cleanup_hpc(Task* t)
 	close(counters->page_faults.fd);
 
 
-	sys_close(counters->cs.fd);
+	close(counters->cs.fd);
 
 
 #endif
@@ -319,9 +325,9 @@ int64_t read_page_faults(struct hpc_context* hpc)
 }
 
 
-int64_t read_cs(struct hpc_context* counters)
+int64_t read_cs(struct hpc_context* hpc)
 {
-	return read_counter(hpc, counters->cs.fd);
+	return read_counter(hpc, hpc->cs.fd);
 }
 
 

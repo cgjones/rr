@@ -198,7 +198,7 @@ Task::Task(pid_t _tid, pid_t _rec_tid, int _priority)
 	, syscallbuf_hdr(), num_syscallbuf_bytes(), syscallbuf_child()
 	, blocked_sigs()
 	, prname("???")
-	, rbcs(0)
+	, rbcs(0), irc(0)
 	, registers_known(false), extra_registers_known(false)
 	, robust_futex_list(), robust_futex_list_len()
 	, session_record(nullptr), session_replay(nullptr)
@@ -783,10 +783,12 @@ Task::record_event(const Event& ev)
 #ifdef HPC_ENABLE_EXTRA_PERF_COUNTERS
 		frame.hw_interrupts = read_hw_int(hpc);
 		frame.page_faults = read_page_faults(hpc);
-		frame.insts = read_insts(hpc);
+
+		irc += read_insts(hpc);
+		frame.insts = irc;
 
 
-		frame->cs = read_cs(hpc);
+		frame.cs = read_cs(hpc);
 
 
 #endif
@@ -813,14 +815,25 @@ void
 Task::flush_inconsistent_state()
 {
 	rbcs = 0;
+	irc = 0;
 }
 
 int64_t
 Task::rbc_count()
 {
 	int64_t hpc_rbcs = read_rbc(hpc);
-	if (hpc_rbcs > 0) {
+
+
+	int64_t hpc_rinsns = read_insts(hpc);
+
+
+	if (hpc_rbcs > 0 || hpc_rinsns > 0) {
 		rbcs += hpc_rbcs;
+
+
+		irc += hpc_rinsns;
+
+
 		reset_hpc(this, 0);
 	}
 	return rbcs;
@@ -1674,6 +1687,9 @@ Task::copy_state(Task* from)
 	pending_events = from->pending_events;
 
 	rbcs = from->rbc_count();
+	irc = from->irc;
+
+
 	tid_futex = from->tid_futex;
 
 	reset_hpc(this, 0);

@@ -1276,6 +1276,11 @@ private:
 	// Count of all rbcs seen by this task since tracees became
 	// consistent.
 	int64_t rbcs;
+
+
+	int64_t irc;
+
+
 	// When |registers_known|, these are our child registers.
 	// When execution is resumed, we no longer know what the child
 	// registers are so the flag is unset.  The next time the
